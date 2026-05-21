@@ -26,7 +26,14 @@ app = App(token=os.environ["SLACK_BOT_TOKEN"])
 # Bot must be added to this channel to receive its messages.
 PAYMENT_CHANNEL_ID = os.environ.get("PAYMENT_CHANNEL_ID", "C0AT59F5F2P")
 
-# Start proactive scheduler (daily Drive check + weekly reminders)
+# Init usage tracking DB
+try:
+    from usage_tracker import init_db
+    init_db()
+except Exception as _db_err:
+    logger.warning(f"UsageTracker DB init failed: {_db_err}")
+
+# Start proactive scheduler (daily Drive check + weekly reminders + usage stats)
 try:
     from scheduler import start_scheduler
     _scheduler = start_scheduler(app)
@@ -246,6 +253,34 @@ def handle_project_command(ack, command, client):
     send_action_menu(client, command["channel_id"], command["user_id"])
 
 
+@app.command("/stats")
+def handle_stats_command(ack, command, client):
+    """
+    /stats [weeks]  — usage digest for the last N weeks (default 1).
+    Anyone can call it; stats cover the whole team.
+    """
+    ack()
+    user_id = command["user_id"]
+    channel = command["channel_id"]
+
+    raw = (command.get("text") or "").strip()
+    try:
+        weeks_back = max(1, min(int(raw), 12)) if raw.isdigit() else 1
+    except ValueError:
+        weeks_back = 1
+
+    from usage_tracker import get_weekly_stats, format_weekly_report
+    try:
+        stats = get_weekly_stats(weeks_back=weeks_back)
+        report = format_weekly_report(stats)
+    except Exception as e:
+        logger.error(f"[/stats] Failed: {e}")
+        report = "⚠️ Не вдалося отримати статистику. Спробуй пізніше."
+
+    # Send as ephemeral so only the caller sees it
+    client.chat_postEphemeral(channel=channel, user=user_id, text=report)
+
+
 def _is_payment_notification(text: str) -> bool:
     """Heuristic: does this message look like a 1C payment notification?"""
     keywords = ["оплачено", "контрагент", "сума документу", "дата платежу"]
@@ -333,6 +368,18 @@ def handle_message(message, say, client):
                 file_text += f"\n--- {f.get('name', 'file')} ---\n{extracted}"
 
     if not text and not file_text:
+        return
+
+    # ── Stats shortcut: "статистика" / "stats" ────────────────────────────────
+    if text.lower().strip() in ("статистика", "stats", "/stats"):
+        from usage_tracker import get_weekly_stats, format_weekly_report
+        try:
+            stats = get_weekly_stats(weeks_back=1)
+            report = format_weekly_report(stats)
+        except Exception as e:
+            logger.error(f"[stats keyword] Failed: {e}")
+            report = "⚠️ Не вдалося отримати статистику."
+        say(text=report)
         return
 
     # Show typing indicator

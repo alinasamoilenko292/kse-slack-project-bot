@@ -17,6 +17,7 @@ from notion_tools import TOOL_DEFINITIONS, execute_tool
 from drive_client import DRIVE_TOOL_DEFINITIONS, execute_drive_tool
 from budget_tools import BUDGET_TOOL_DEFINITIONS, execute_budget_tool
 from system_prompt import SYSTEM_PROMPT
+from usage_tracker import log_event, log_tool_calls
 
 logger = logging.getLogger(__name__)
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -114,6 +115,9 @@ def run_agent(
     """
     history = get_history(slack_user_id)
 
+    # Track incoming message
+    log_event(slack_user_id, "message", display_name)
+
     # Build user turn content
     content = user_message
     if file_content:
@@ -173,6 +177,15 @@ def run_agent(
                 if hasattr(block, "text"):
                     text += block.text
             set_history(slack_user_id, history)
+            # Log tool actions used in this session turn
+            used_tools = [
+                b.name
+                for msg in history if isinstance(msg.get("content"), list)
+                for b in (msg["content"] if isinstance(msg["content"], list) else [])
+                if hasattr(b, "type") and b.type == "tool_use"
+            ]
+            if used_tools:
+                log_tool_calls(slack_user_id, used_tools, display_name)
             return text.strip()
 
         elif response.stop_reason == "tool_use":
