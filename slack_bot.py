@@ -351,6 +351,12 @@ def handle_message(message, say, client):
         if f"<@{app._client.token}" not in message.get("text", ""):
             return
 
+    # Ignore edited messages and bot messages to prevent double-processing
+    if message.get("subtype") in ("message_changed", "message_deleted", "bot_message"):
+        return
+    if message.get("edited"):
+        return
+
     slack_user_id = message.get("user")
     if not slack_user_id:
         return
