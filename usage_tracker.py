@@ -102,19 +102,27 @@ def log_tool_calls(
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
-def get_weekly_stats(weeks_back: int = 1) -> dict:
+def get_weekly_stats(weeks_back: int = 0) -> dict:
     """
-    Returns stats for the last `weeks_back` full ISO week(s).
-    A "week" starts on Monday 00:00 Kyiv → we use UTC approximation here
-    (good enough for a digest).
+    weeks_back=0 → поточний тиждень (з понеділка до зараз)
+    weeks_back=1 → минулий повний тиждень
+    weeks_back=2 → позаминулий, тощо
     """
     now = datetime.now(timezone.utc)
-    # Start of the target week (Monday 00:00 UTC)
     days_since_monday = now.weekday()
-    week_start = (now - timedelta(days=days_since_monday + 7 * weeks_back)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    week_end = week_start + timedelta(days=7)
+
+    if weeks_back == 0:
+        # Current week: from Monday 00:00 to now
+        week_start = (now - timedelta(days=days_since_monday)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        week_end = now
+    else:
+        # Full past week
+        week_start = (now - timedelta(days=days_since_monday + 7 * weeks_back)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        week_end = week_start + timedelta(days=7)
 
     start_iso = week_start.isoformat()
     end_iso   = week_end.isoformat()
@@ -162,9 +170,14 @@ def get_weekly_stats(weeks_back: int = 1) -> dict:
         ).fetchall()
         users = [dict(r) for r in user_rows]
 
+    if weeks_back == 0:
+        week_end_label = "сьогодні"
+    else:
+        week_end_label = (week_end - timedelta(days=1)).strftime("%d.%m.%Y")
+
     return {
         "week_start": week_start.strftime("%d.%m"),
-        "week_end":   (week_end - timedelta(days=1)).strftime("%d.%m.%Y"),
+        "week_end":   week_end_label,
         "total_messages": total_messages,
         "unique_users":   unique_users,
         "actions":        actions,

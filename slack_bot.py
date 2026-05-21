@@ -265,9 +265,9 @@ def handle_stats_command(ack, command, client):
 
     raw = (command.get("text") or "").strip()
     try:
-        weeks_back = max(1, min(int(raw), 12)) if raw.isdigit() else 1
+        weeks_back = max(0, min(int(raw), 12)) if raw.isdigit() else 0
     except ValueError:
-        weeks_back = 1
+        weeks_back = 0
 
     from usage_tracker import get_weekly_stats, format_weekly_report
     try:
