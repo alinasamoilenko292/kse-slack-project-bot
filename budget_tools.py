@@ -48,8 +48,9 @@ GENERAL_SHEET_NAME = "general"
 # ── Google Sheets service ─────────────────────────────────────────────────────
 
 def _get_sheets_service():
-    """Build and return a Google Sheets API service (read + write)."""
+    """Build and return a Google Sheets API service (read + write), with timeout."""
     try:
+        import httplib2
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
 
@@ -58,7 +59,8 @@ def _get_sheets_service():
             creds_path,
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
-        return build("sheets", "v4", credentials=creds, cache_discovery=False)
+        http = creds.authorize(httplib2.Http(timeout=20))
+        return build("sheets", "v4", http=http, cache_discovery=False)
     except Exception as e:
         logger.error(f"Failed to build Sheets service: {e}")
         return None

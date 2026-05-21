@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import logging
+import concurrent.futures
 from anthropic import Anthropic
 from notion_tools import TOOL_DEFINITIONS, execute_tool
 from drive_client import DRIVE_TOOL_DEFINITIONS, execute_drive_tool
@@ -27,6 +28,7 @@ MODEL_FAST  = "claude-haiku-4-5-20251001"
 MAX_TOKENS  = 4096
 MAX_TOKENS_FAST = 1024
 MAX_TOOL_LOOPS  = 5
+TOOL_TIMEOUT    = 25  # seconds — if a tool hangs, return error instead of blocking forever
 
 # ── Short confirmations → Haiku ────────────────────────────────────────────────
 _CONFIRMATIONS = {
@@ -197,11 +199,25 @@ def run_agent(
                 if block.type == "tool_use":
                     logger.info(f"Tool call: {block.name}({block.input})")
                     if block.name in drive_tool_names:
-                        result = execute_drive_tool(block.name, block.input)
+                        fn = execute_drive_tool
                     elif block.name in budget_tool_names:
-                        result = execute_budget_tool(block.name, block.input)
+                        fn = execute_budget_tool
                     else:
-                        result = execute_tool(block.name, block.input)
+                        fn = execute_tool
+                    try:
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                            future = ex.submit(fn, block.name, block.input)
+                            result = future.result(timeout=TOOL_TIMEOUT)
+                    except concurrent.futures.TimeoutError:
+                        logger.error(f"Tool {block.name} timed out after {TOOL_TIMEOUT}s")
+                        result = (
+                            f"Помилка: інструмент {block.name} не відповів протягом "
+                            f"{TOOL_TIMEOUT} секунд. Можливо, Google API тимчасово недоступний. "
+                            "Повідом користувача і запропонуй спробувати ще раз."
+                        )
+                    except Exception as e:
+                        logger.error(f"Tool {block.name} raised: {e}")
+                        result = f"Помилка виконання {block.name}: {e}"
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
