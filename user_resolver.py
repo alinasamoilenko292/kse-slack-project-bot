@@ -27,8 +27,6 @@ slack_client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
 
 # In-memory cache: email (lowercase) → notion_user_id
 _cache: dict[str, str] = {}
-# Track emails we've already scanned the DB for (to avoid re-scanning)
-_scanned_emails: set[str] = set()
 # Reverse cache: notion_user_id → slack_user_id  (populated during normal bot use)
 _notion_to_slack: dict[str, str] = {}
 
@@ -86,15 +84,15 @@ def _search_notion_db_for_email(email: str) -> str | None:
     Scan existing Projects to find guests who appear in person fields.
     Guests with page/database-level access show up in page properties
     even if they're not in /v1/users.
-    This is a one-time scan per unique email — results are cached.
+    NOTE: requires "Read user information including email addresses"
+    capability enabled in the Notion integration settings.
     """
-    if email in _scanned_emails:
-        return None  # Already scanned, nothing found
-
-    _scanned_emails.add(email)
-    logger.info(f"Scanning Projects DB to find Notion guest: {email}")
+    logger.info(f"[Resolver] Scanning Projects DB for email: {email}")
 
     cursor = None
+    pages_scanned = 0
+    emails_found: set[str] = set()  # for diagnostics only
+
     while True:
         kwargs = {"database_id": NOTION_DATABASE_ID, "page_size": 100}
         if cursor:
@@ -102,10 +100,11 @@ def _search_notion_db_for_email(email: str) -> str | None:
         try:
             response = notion.databases.query(**kwargs)
         except Exception as e:
-            logger.warning(f"DB scan failed: {e}")
+            logger.warning(f"[Resolver] DB scan failed: {e}")
             return None
 
         for page in response.get("results", []):
+            pages_scanned += 1
             props = page.get("properties", {})
             for field in PERSON_FIELDS:
                 prop = props.get(field, {})
@@ -113,13 +112,30 @@ def _search_notion_db_for_email(email: str) -> str | None:
                     person_email = person.get("person", {}).get("email", "").lower()
                     notion_id = person.get("id")
                     if person_email and notion_id:
-                        _cache[person_email] = notion_id
+                        emails_found.add(person_email)
+                        _cache[person_email] = notion_id  # cache all found emails
                     if person_email == email:
+                        logger.info(f"[Resolver] Found {email} → {notion_id} in DB scan")
                         return notion_id
 
         if not response.get("has_more"):
             break
         cursor = response.get("next_cursor")
+
+    # Diagnostic: show if ANY emails were found at all
+    if emails_found:
+        logger.warning(
+            f"[Resolver] DB scan done ({pages_scanned} pages). "
+            f"Found {len(emails_found)} person emails, but NOT {email!r}. "
+            f"Sample emails in DB: {list(emails_found)[:5]}"
+        )
+    else:
+        logger.warning(
+            f"[Resolver] DB scan done ({pages_scanned} pages). "
+            f"Found ZERO person emails in any project. "
+            f"Likely fix: enable 'Read user information including email addresses' "
+            f"in your Notion integration settings at notion.so/my-integrations"
+        )
 
     return None
 
@@ -139,31 +155,42 @@ def resolve(slack_user_id: str) -> dict:
     display_name = _get_slack_display_name(slack_user_id)
 
     if not email:
+        logger.warning(f"[Resolver] Slack user {slack_user_id} ({display_name!r}): no email in profile")
         return {"email": None, "notion_id": None, "found": False,
                 "display_name": display_name}
 
     # Check cache first
     if email in _cache:
+        logger.info(f"[Resolver] {email} → {_cache[email]} (cache hit)")
         return {"email": email, "notion_id": _cache[email],
                 "found": True, "display_name": display_name}
 
+    logger.info(f"[Resolver] Resolving {email} for Slack user {slack_user_id} ({display_name!r})...")
+
     # 1. Try workspace users endpoint
     notion_id = _search_notion_workspace_users(email)
+    if notion_id:
+        logger.info(f"[Resolver] {email} → {notion_id} (found via workspace users)")
+    else:
+        logger.info(f"[Resolver] {email} not found in workspace users, scanning DB...")
 
     # 2. If not found, scan existing DB records (catches guests)
     if not notion_id:
         notion_id = _search_notion_db_for_email(email)
+        if notion_id:
+            logger.info(f"[Resolver] {email} → {notion_id} (found via DB scan)")
+        else:
+            logger.warning(
+                f"[Resolver] ❌ Could not find Notion user for email: {email} "
+                f"(Slack: {slack_user_id}, name: {display_name!r}). "
+                f"Відповідальна особа буде порожньою. "
+                f"Щоб виправити: переконайся що {email} є членом workspace Notion "
+                f"або доданий до бази Projects."
+            )
 
     if notion_id:
         _cache[email] = notion_id
         _notion_to_slack[notion_id] = slack_user_id  # reverse mapping for scheduler
-        logger.info(f"Resolved {email} → {notion_id}")
-    else:
-        logger.warning(
-            f"Could not find Notion user for email: {email}. "
-            f"Project will be created without Відповідальна особа set as person. "
-            f"To fix: invite {email} to the Projects database in Notion."
-        )
 
     return {
         "email": email,
