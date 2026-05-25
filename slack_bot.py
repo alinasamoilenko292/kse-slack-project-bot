@@ -388,6 +388,18 @@ def handle_message(message, say, client):
         say(text=report)
         return
 
+    # ── Drive check shortcut: manual trigger for diagnostics ─────────────────
+    if text.lower().strip() in ("перевір драйв", "check drive", "/check-drive"):
+        say(text="⏳ Запускаю перевірку Drive...")
+        try:
+            from scheduler import run_drive_check_now
+            result = run_drive_check_now()
+            say(text=f"✅ {result}")
+        except Exception as e:
+            logger.error(f"[check-drive] Failed: {e}", exc_info=True)
+            say(text=f"⚠️ Помилка при перевірці Drive: {e}")
+        return
+
     # Show typing indicator
     client.chat_postEphemeral(
         channel=channel,

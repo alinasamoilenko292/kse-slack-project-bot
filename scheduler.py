@@ -15,7 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytz
@@ -39,7 +40,7 @@ def _load_state() -> dict:
             return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning(f"Could not load scheduler state: {e}")
-    return {"drive_files": {}, "last_1c_reminders": {}}
+    return {}
 
 
 def _save_state(state: dict) -> None:
@@ -65,96 +66,142 @@ def _send_dm(slack_user_id: str, text: str) -> None:
         logger.error(f"Scheduler DM failed for {slack_user_id}: {e}")
 
 
+# ── Helper: extract Drive folder ID from URL ──────────────────────────────────
+
+def _extract_drive_folder_id(url: str) -> str | None:
+    """
+    Extract Google Drive folder ID from various URL formats:
+      https://drive.google.com/drive/folders/FOLDER_ID[?usp=sharing]
+      https://drive.google.com/open?id=FOLDER_ID
+    """
+    if not url:
+        return None
+    m = re.search(r'/folders/([a-zA-Z0-9_-]+)', url)
+    if m:
+        return m.group(1)
+    m = re.search(r'[?&]id=([a-zA-Z0-9_-]+)', url)
+    if m:
+        return m.group(1)
+    return None
+
+
 # ── Job 1: Daily Drive check ──────────────────────────────────────────────────
 
-def daily_drive_check() -> None:
+def daily_drive_check() -> str:
     """
-    For each active project that has a known Drive folder,
-    check whether new files appeared since the last run.
-    Notify the responsible person if yes.
+    For each active project with a Drive folder link in Notion,
+    check for files uploaded/modified in the last 24h (72h on Monday).
+    Notify responsible persons if any found.
+
+    Runs Mon–Fri at 14:00 Kyiv. Monday covers the weekend (72h window).
+    Returns a summary string — also usable for manual diagnostics via bot.
     """
-    logger.info("[Scheduler] Running daily Drive check...")
+    now_utc = datetime.now(timezone.utc)
+    now_kyiv = datetime.now(KYIV_TZ)
+    is_monday = now_kyiv.weekday() == 0
+    hours_back = 72 if is_monday else 24
+    since = now_utc - timedelta(hours=hours_back)
+
+    period_label = "вихідних (72 год)" if is_monday else "останніх 24 годин"
+    logger.info(
+        f"[Scheduler] Running daily Drive check "
+        f"({'Monday — 72h window' if is_monday else '24h window'}), "
+        f"since {since.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
 
     try:
         from notion_tools import get_all_active_projects
-        from drive_client import find_project_folder, get_new_files_in_folder
+        from drive_client import get_recent_files_in_folder
         from user_resolver import get_slack_id_for_notion_user
     except Exception as e:
-        logger.error(f"[Scheduler] Import error in daily_drive_check: {e}", exc_info=True)
-        return
-
-    state = _load_state()
-    drive_state: dict = state.get("drive_files", {})
+        logger.error(f"[Scheduler] Import error: {e}", exc_info=True)
+        return f"Помилка імпорту: {e}"
 
     try:
         projects = get_all_active_projects()
     except Exception as e:
         logger.error(f"[Scheduler] Could not fetch active projects: {e}", exc_info=True)
-        return
+        return f"Не вдалося отримати проєкти: {e}"
 
-    logger.info(f"[Scheduler] Checking Drive for {len(projects)} active projects")
+    logger.info(f"[Scheduler] {len(projects)} active projects to check")
+
+    checked = 0
     notified = 0
+    skipped_no_folder = 0
 
     for project in projects:
-        project_id = project.get("id")
-        project_name = project.get("Назва", "")
-        owners = project.get("Відповідальна особа", [])
+        project_name = project.get("Назва", "?")
+        owner_ids = project.get("_owner_ids", [])
 
-        if not project_name or not owners:
+        # Get Drive folder ID from Notion URL
+        folder_url = project.get("Syllabus / Посилання на папку проєкту")
+        folder_id = _extract_drive_folder_id(folder_url) if folder_url else None
+
+        if not folder_id:
+            # Fallback: search by name in Drive
+            try:
+                from drive_client import find_project_folder
+                folder = find_project_folder(project_name)
+                if folder:
+                    folder_id = folder["id"]
+            except Exception as e:
+                logger.warning(f"[Scheduler] Name search failed for '{project_name}': {e}")
+
+        if not folder_id:
+            skipped_no_folder += 1
             continue
 
-        # Find Drive folder
+        # Find recently modified files
         try:
-            folder = find_project_folder(project_name)
-        except Exception as e:
-            logger.warning(f"[Scheduler] find_project_folder failed for '{project_name}': {e}")
-            continue
-
-        if not folder:
-            continue
-
-        folder_id = folder["id"]
-        proj_state = drive_state.get(project_id, {"folder_id": folder_id, "file_ids": []})
-        known_ids = proj_state.get("file_ids", [])
-
-        # Get new files
-        try:
-            new_files = get_new_files_in_folder(folder_id, known_ids)
+            recent_files = get_recent_files_in_folder(folder_id, since)
         except Exception as e:
             logger.warning(f"[Scheduler] Drive check failed for '{project_name}': {e}")
             continue
 
-        if new_files:
-            # Build notification message
-            file_list = "\n".join(f"  • {f['name']}" for f in new_files[:10])
-            text = (
-                f"👋 Привіт! У папці проєкту *{project_name}* з'явилися нові файли:\n"
-                f"{file_list}\n\n"
-                f"Хочеш додати дані звідти в Notion? "
-                f"Просто напиши мені — я прочитаю файли і запропоную що оновити."
-            )
+        checked += 1
 
-            # Notify all responsible persons
-            for owner_name in owners:
-                slack_id = _resolve_owner_to_slack(owner_name, project)
-                if slack_id:
-                    _send_dm(slack_id, text)
-                    notified += 1
+        if not recent_files:
+            logger.debug(f"[Scheduler] '{project_name}': no recent files")
+            continue
 
-            # Update known file IDs
-            all_ids = list(set(known_ids + [f["id"] for f in new_files]))
-            proj_state["file_ids"] = all_ids
+        # Build notification
+        file_list = "\n".join(f"  • {f['name']}" for f in recent_files[:10])
+        extra = f"\n  _...і ще {len(recent_files) - 10} файл(ів)_" if len(recent_files) > 10 else ""
+        text = (
+            f"👋 Привіт! У папці проєкту *{project_name}* "
+            f"за {period_label} з'явилися нові файли:\n"
+            f"{file_list}{extra}\n\n"
+            f"Хочеш додати дані звідти в Notion? "
+            f"Просто напиши мені — я прочитаю файли і запропоную що оновити."
+        )
+        logger.info(
+            f"[Scheduler] '{project_name}': {len(recent_files)} recent file(s), "
+            f"notifying {len(owner_ids)} owner(s)"
+        )
 
-        proj_state["folder_id"] = folder_id
-        proj_state["last_check"] = datetime.now(timezone.utc).isoformat()
-        drive_state[project_id] = proj_state
+        for notion_uid in owner_ids:
+            slack_id = get_slack_id_for_notion_user(notion_uid)
+            if slack_id:
+                _send_dm(slack_id, text)
+                notified += 1
+                logger.info(f"[Scheduler] DM sent → Slack {slack_id} (Notion: {notion_uid})")
+            else:
+                logger.warning(
+                    f"[Scheduler] Cannot resolve Slack ID for Notion user {notion_uid} "
+                    f"(project: '{project_name}'). "
+                    f"Fix: user should send any message to the bot once to warm the cache, "
+                    f"OR enable 'Read user information including email addresses' "
+                    f"at notion.so/my-integrations."
+                )
 
-    state["drive_files"] = drive_state
-    _save_state(state)
-    logger.info(
-        f"[Scheduler] Daily Drive check done. "
-        f"Checked {len(projects)} projects, sent {notified} notification(s)."
+    summary = (
+        f"Drive check ({period_label}) done. "
+        f"Checked: {checked}/{len(projects)}, "
+        f"sent: {notified} DM(s), "
+        f"skipped (no folder): {skipped_no_folder}."
     )
+    logger.info(f"[Scheduler] {summary}")
+    return summary
 
 
 # ── Job 2: Weekly missing fields reminder ────────────────────────────────────
@@ -237,21 +284,14 @@ def weekly_missing_fields_reminder() -> None:
     logger.info(f"[Scheduler] Sent reminders to {sent}/{len(owner_issues)} managers.")
 
 
-# ── Helper: resolve owner name → Slack ID ────────────────────────────────────
+# ── Public: manual Drive check (for bot diagnostics) ─────────────────────────
 
-def _resolve_owner_to_slack(owner_name: str, project: dict) -> str | None:
+def run_drive_check_now() -> str:
     """
-    Try to get Slack ID for a project owner.
-    Uses notion_id stored in project data when available.
+    Run daily_drive_check immediately and return a human-readable summary.
+    Call this from the bot when user types 'перевір драйв' / 'check drive'.
     """
-    from user_resolver import get_slack_id_for_notion_user
-
-    owner_ids = project.get("_owner_ids", [])
-    for uid in owner_ids:
-        slack_id = get_slack_id_for_notion_user(uid)
-        if slack_id:
-            return slack_id
-    return None
+    return daily_drive_check()
 
 
 # ── APScheduler event listener ────────────────────────────────────────────────
@@ -298,12 +338,15 @@ def start_scheduler(slack_app) -> BackgroundScheduler:
         EVENT_JOB_ERROR | EVENT_JOB_EXECUTED | EVENT_JOB_MISSED,
     )
 
-    # Daily Drive check — 14:00 Kyiv
+    # Daily Drive check — Mon–Fri 14:00 Kyiv
+    # Monday: 72h window (covers Fri afternoon + weekend)
+    # Tue–Fri: 24h window
     # misfire_grace_time=3600: if bot was down at 14:00 and restarts within 1h, still runs
     # max_instances=1: never run two instances simultaneously
     scheduler.add_job(
         daily_drive_check,
         trigger="cron",
+        day_of_week="mon-fri",
         hour=14,
         minute=0,
         id="daily_drive_check",

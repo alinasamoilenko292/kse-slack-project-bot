@@ -407,7 +407,6 @@ def read_project_folder_contents(project_name: str) -> dict:
 def get_new_files_in_folder(folder_id: str, known_file_ids: list[str]) -> list[dict]:
     """
     Returns files in folder that are NOT in known_file_ids.
-    Used by the daily scheduler to detect new uploads.
     Checks top-level + one subfolder level.
     """
     service = _get_service()
@@ -424,6 +423,61 @@ def get_new_files_in_folder(folder_id: str, known_file_ids: list[str]) -> list[d
 
     new_files = [f for f in all_files if f["id"] not in known]
     return new_files
+
+
+def get_recent_files_in_folder(folder_id: str, since: "datetime") -> list[dict]:
+    """
+    Return files modified after `since` (timezone-aware UTC datetime).
+    Checks top-level files + one subfolder level.
+    Skips subfolders themselves — only actual files are returned.
+    Used by the daily scheduler to detect uploads from the last 24/72 hours.
+    """
+    service = _get_service()
+    if not service:
+        return []
+
+    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _query_recent(fid: str) -> list[dict]:
+        try:
+            results = service.files().list(
+                q=(
+                    f"'{fid}' in parents "
+                    f"and trashed = false "
+                    f"and mimeType != 'application/vnd.google-apps.folder' "
+                    f"and modifiedTime > '{since_str}'"
+                ),
+                fields="files(id, name, mimeType, modifiedTime)",
+                orderBy="modifiedTime desc",
+                pageSize=50,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            return results.get("files", [])
+        except Exception as e:
+            logger.error(f"get_recent_files_in_folder query failed for {fid}: {e}")
+            return []
+
+    files = _query_recent(folder_id)
+
+    # Scan subfolders one level deep (get all subfolders, not just recent ones)
+    try:
+        subfolder_resp = service.files().list(
+            q=(
+                f"'{folder_id}' in parents "
+                f"and mimeType = 'application/vnd.google-apps.folder' "
+                f"and trashed = false"
+            ),
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        for sf in subfolder_resp.get("files", []):
+            files.extend(_query_recent(sf["id"]))
+    except Exception as e:
+        logger.error(f"get_recent_files_in_folder subfolder scan failed: {e}")
+
+    return files
 
 
 # ── Tool definitions for Claude agent ─────────────────────────────────────────
