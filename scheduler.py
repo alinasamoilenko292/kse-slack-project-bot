@@ -2,7 +2,7 @@
 Proactive scheduler for BS Project Setup Bot.
 
 Two jobs:
-1. Daily Drive check (09:00 Kyiv) — detect new files in project folders,
+1. Daily Drive check (14:00 Kyiv) — detect new files in project folders,
    notify the responsible person in Slack.
 2. Weekly missing-fields reminder (Tuesday 10:00 Kyiv) — for each active
    project with unfilled required fields, DM the responsible person.
@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +75,13 @@ def daily_drive_check() -> None:
     """
     logger.info("[Scheduler] Running daily Drive check...")
 
-    from notion_tools import get_all_active_projects
-    from drive_client import find_project_folder, get_new_files_in_folder
-    from user_resolver import get_slack_id_for_notion_user
+    try:
+        from notion_tools import get_all_active_projects
+        from drive_client import find_project_folder, get_new_files_in_folder
+        from user_resolver import get_slack_id_for_notion_user
+    except Exception as e:
+        logger.error(f"[Scheduler] Import error in daily_drive_check: {e}", exc_info=True)
+        return
 
     state = _load_state()
     drive_state: dict = state.get("drive_files", {})
@@ -84,8 +89,11 @@ def daily_drive_check() -> None:
     try:
         projects = get_all_active_projects()
     except Exception as e:
-        logger.error(f"[Scheduler] Could not fetch active projects: {e}")
+        logger.error(f"[Scheduler] Could not fetch active projects: {e}", exc_info=True)
         return
+
+    logger.info(f"[Scheduler] Checking Drive for {len(projects)} active projects")
+    notified = 0
 
     for project in projects:
         project_id = project.get("id")
@@ -98,7 +106,8 @@ def daily_drive_check() -> None:
         # Find Drive folder
         try:
             folder = find_project_folder(project_name)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[Scheduler] find_project_folder failed for '{project_name}': {e}")
             continue
 
         if not folder:
@@ -112,7 +121,7 @@ def daily_drive_check() -> None:
         try:
             new_files = get_new_files_in_folder(folder_id, known_ids)
         except Exception as e:
-            logger.warning(f"[Scheduler] Drive check failed for {project_name}: {e}")
+            logger.warning(f"[Scheduler] Drive check failed for '{project_name}': {e}")
             continue
 
         if new_files:
@@ -130,6 +139,7 @@ def daily_drive_check() -> None:
                 slack_id = _resolve_owner_to_slack(owner_name, project)
                 if slack_id:
                     _send_dm(slack_id, text)
+                    notified += 1
 
             # Update known file IDs
             all_ids = list(set(known_ids + [f["id"] for f in new_files]))
@@ -141,7 +151,10 @@ def daily_drive_check() -> None:
 
     state["drive_files"] = drive_state
     _save_state(state)
-    logger.info(f"[Scheduler] Daily Drive check done. Checked {len(projects)} projects.")
+    logger.info(
+        f"[Scheduler] Daily Drive check done. "
+        f"Checked {len(projects)} projects, sent {notified} notification(s)."
+    )
 
 
 # ── Job 2: Weekly missing fields reminder ────────────────────────────────────
@@ -153,60 +166,75 @@ def weekly_missing_fields_reminder() -> None:
     """
     logger.info("[Scheduler] Running weekly missing-fields reminder...")
 
-    from notion_tools import get_all_active_projects
-    from schemas import get_missing_required
-    from user_resolver import get_slack_id_for_notion_user
+    try:
+        from notion_tools import get_all_active_projects
+        from schemas import get_missing_required
+        from user_resolver import get_slack_id_for_notion_user
+    except Exception as e:
+        logger.error(f"[Scheduler] Import error in weekly_missing_fields_reminder: {e}", exc_info=True)
+        return
 
     try:
         projects = get_all_active_projects()
     except Exception as e:
-        logger.error(f"[Scheduler] Could not fetch active projects: {e}")
+        logger.error(f"[Scheduler] Could not fetch active projects: {e}", exc_info=True)
         return
+
+    logger.info(f"[Scheduler] Checking missing fields for {len(projects)} active projects")
 
     # Group missing fields by owner
     owner_issues: dict[str, list[dict]] = {}  # notion_user_id → [{name, missing, url}]
 
     for project in projects:
-        project_type = project.get("Тип проєкту", "")
-        missing = get_missing_required(project, project_type)
-        if not missing:
-            continue
+        try:
+            project_type = project.get("Тип проєкту", "")
+            missing = get_missing_required(project, project_type)
+            if not missing:
+                continue
 
-        owners_raw = project.get("_owner_ids", [])
-        for notion_uid in owners_raw:
-            if notion_uid not in owner_issues:
-                owner_issues[notion_uid] = []
-            owner_issues[notion_uid].append({
-                "name": project.get("Назва", "—"),
-                "url": project.get("url", ""),
-                "missing": missing,
-            })
+            owners_raw = project.get("_owner_ids", [])
+            for notion_uid in owners_raw:
+                if notion_uid not in owner_issues:
+                    owner_issues[notion_uid] = []
+                owner_issues[notion_uid].append({
+                    "name": project.get("Назва", "—"),
+                    "url": project.get("url", ""),
+                    "missing": missing,
+                })
+        except Exception as e:
+            logger.warning(f"[Scheduler] Error processing project {project.get('Назва', '?')}: {e}")
+            continue
 
     if not owner_issues:
         logger.info("[Scheduler] No missing fields found across active projects.")
         return
 
+    sent = 0
     for notion_uid, issues in owner_issues.items():
-        slack_id = get_slack_id_for_notion_user(notion_uid)
-        if not slack_id:
-            logger.warning(f"[Scheduler] Cannot resolve Slack ID for Notion user {notion_uid}")
-            continue
+        try:
+            slack_id = get_slack_id_for_notion_user(notion_uid)
+            if not slack_id:
+                logger.warning(f"[Scheduler] Cannot resolve Slack ID for Notion user {notion_uid}")
+                continue
 
-        lines = [
-            "📋 *Щотижневе нагадування* — ось твої проєкти з незаповненими полями:\n"
-        ]
-        for issue in issues[:10]:
-            field_list = ", ".join(issue["missing"])
-            url = f" (<{issue['url']}|відкрити>)" if issue["url"] else ""
-            lines.append(f"• *{issue['name']}*{url}\n  ❌ Бракує: {field_list}")
+            lines = [
+                "📋 *Щотижневе нагадування* — ось твої проєкти з незаповненими полями:\n"
+            ]
+            for issue in issues[:10]:
+                field_list = ", ".join(issue["missing"])
+                url = f" (<{issue['url']}|відкрити>)" if issue["url"] else ""
+                lines.append(f"• *{issue['name']}*{url}\n  ❌ Бракує: {field_list}")
 
-        lines.append(
-            "\nНапиши мені назву проєкту — я допоможу дозаповнити прямо тут."
-        )
+            lines.append(
+                "\nНапиши мені назву проєкту — я допоможу дозаповнити прямо тут."
+            )
 
-        _send_dm(slack_id, "\n".join(lines))
+            _send_dm(slack_id, "\n".join(lines))
+            sent += 1
+        except Exception as e:
+            logger.error(f"[Scheduler] Failed to send reminder to {notion_uid}: {e}")
 
-    logger.info(f"[Scheduler] Sent reminders to {len(owner_issues)} managers.")
+    logger.info(f"[Scheduler] Sent reminders to {sent}/{len(owner_issues)} managers.")
 
 
 # ── Helper: resolve owner name → Slack ID ────────────────────────────────────
@@ -226,6 +254,27 @@ def _resolve_owner_to_slack(owner_name: str, project: dict) -> str | None:
     return None
 
 
+# ── APScheduler event listener ────────────────────────────────────────────────
+
+def _scheduler_event_listener(event) -> None:
+    """Log job outcomes so failures are visible in bot logs."""
+    if event.exception:
+        logger.error(
+            f"[Scheduler] ❌ Job '{event.job_id}' FAILED with exception: {event.exception}",
+            exc_info=event.exception,
+        )
+    elif hasattr(event, "retval"):
+        # EVENT_JOB_EXECUTED
+        logger.info(f"[Scheduler] ✅ Job '{event.job_id}' completed successfully.")
+    else:
+        # EVENT_JOB_MISSED
+        logger.warning(
+            f"[Scheduler] ⚠️ Job '{event.job_id}' was MISSED "
+            f"(scheduled time: {getattr(event, 'scheduled_run_time', '?')}). "
+            "It will run at the next scheduled time."
+        )
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 def start_scheduler(slack_app) -> BackgroundScheduler:
@@ -243,7 +292,15 @@ def start_scheduler(slack_app) -> BackgroundScheduler:
 
     scheduler = BackgroundScheduler(timezone=KYIV_TZ)
 
+    # Log all job outcomes (errors, completions, missed runs)
+    scheduler.add_listener(
+        _scheduler_event_listener,
+        EVENT_JOB_ERROR | EVENT_JOB_EXECUTED | EVENT_JOB_MISSED,
+    )
+
     # Daily Drive check — 14:00 Kyiv
+    # misfire_grace_time=3600: if bot was down at 14:00 and restarts within 1h, still runs
+    # max_instances=1: never run two instances simultaneously
     scheduler.add_job(
         daily_drive_check,
         trigger="cron",
@@ -251,6 +308,8 @@ def start_scheduler(slack_app) -> BackgroundScheduler:
         minute=0,
         id="daily_drive_check",
         replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
 
     # Weekly missing-fields reminder — Tuesday 10:00 Kyiv
@@ -262,6 +321,8 @@ def start_scheduler(slack_app) -> BackgroundScheduler:
         minute=0,
         id="weekly_missing_fields",
         replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
 
     scheduler.start()

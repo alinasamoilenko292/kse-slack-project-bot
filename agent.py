@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import logging
+import time
 import concurrent.futures
 from anthropic import Anthropic
 from notion_tools import TOOL_DEFINITIONS, execute_tool
@@ -29,6 +30,8 @@ MAX_TOKENS  = 4096
 MAX_TOKENS_FAST = 1024
 MAX_TOOL_LOOPS  = 5
 TOOL_TIMEOUT    = 25  # seconds — if a tool hangs, return error instead of blocking forever
+TOOL_RETRY_MAX  = 1   # auto-retry count on timeout (1 = one retry before giving up)
+TOOL_RETRY_WAIT = 4   # seconds to wait between retries
 
 # ── Short confirmations → Haiku ────────────────────────────────────────────────
 _CONFIRMATIONS = {
@@ -204,20 +207,36 @@ def run_agent(
                         fn = execute_budget_tool
                     else:
                         fn = execute_tool
-                    try:
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                            future = ex.submit(fn, block.name, block.input)
-                            result = future.result(timeout=TOOL_TIMEOUT)
-                    except concurrent.futures.TimeoutError:
-                        logger.error(f"Tool {block.name} timed out after {TOOL_TIMEOUT}s")
-                        result = (
-                            f"Помилка: інструмент {block.name} не відповів протягом "
-                            f"{TOOL_TIMEOUT} секунд. Можливо, Google API тимчасово недоступний. "
-                            "Повідом користувача і запропонуй спробувати ще раз."
-                        )
-                    except Exception as e:
-                        logger.error(f"Tool {block.name} raised: {e}")
-                        result = f"Помилка виконання {block.name}: {e}"
+                    result = None
+                    for _attempt in range(TOOL_RETRY_MAX + 1):
+                        try:
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                                future = ex.submit(fn, block.name, block.input)
+                                result = future.result(timeout=TOOL_TIMEOUT)
+                            break  # success — exit retry loop
+                        except concurrent.futures.TimeoutError:
+                            if _attempt < TOOL_RETRY_MAX:
+                                logger.warning(
+                                    f"Tool {block.name} timed out (attempt {_attempt+1}), "
+                                    f"retrying in {TOOL_RETRY_WAIT}s..."
+                                )
+                                time.sleep(TOOL_RETRY_WAIT)
+                            else:
+                                logger.error(
+                                    f"Tool {block.name} timed out after "
+                                    f"{TOOL_RETRY_MAX + 1} attempt(s)"
+                                )
+                                result = (
+                                    f"Помилка: інструмент {block.name} не відповів протягом "
+                                    f"{TOOL_TIMEOUT} секунд (спроба {TOOL_RETRY_MAX + 1}/{TOOL_RETRY_MAX + 1}). "
+                                    "Можливо, Google API тимчасово недоступний. "
+                                    "Повідом користувача що Google Sheets зараз не відповідає — "
+                                    "дані збережено, достатньо написати 'повтори запис' за хвилину."
+                                )
+                        except Exception as e:
+                            logger.error(f"Tool {block.name} raised: {e}")
+                            result = f"Помилка виконання {block.name}: {e}"
+                            break  # don't retry on non-timeout errors
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
