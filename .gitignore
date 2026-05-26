@@ -16,3 +16,6 @@ data/
 
 # OS
 .DS_Store
+.env.txt
+*.env.*
+.env.txt
