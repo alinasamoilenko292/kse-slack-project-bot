@@ -318,7 +318,7 @@ def get_active_projects_for_user(owner_notion_id: str) -> list[dict]:
                 "property": "Відповідальна особа",
                 "people": {"contains": owner_notion_id}
             },
-            sorts=[{"property": "Last edited time", "direction": "descending"}],
+            sorts=[{"timestamp": "last_edited_time", "direction": "descending"}],
             page_size=50,
         )
         results = []
@@ -379,7 +379,7 @@ def get_all_active_projects() -> list[dict]:
         kwargs = {
             "database_id": NOTION_DATABASE_ID,
             "page_size": 50,
-            "sorts": [{"property": "Last edited time", "direction": "descending"}],
+            "sorts": [{"timestamp": "last_edited_time", "direction": "descending"}],
         }
         if cursor:
             kwargs["start_cursor"] = cursor
