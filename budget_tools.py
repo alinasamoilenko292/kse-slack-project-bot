@@ -48,21 +48,33 @@ GENERAL_SHEET_NAME = "general"
 # ── Google Sheets service ─────────────────────────────────────────────────────
 
 def _get_sheets_service():
-    """Build and return a Google Sheets API service (read + write), with timeout."""
+    """Build and return a Google Sheets API service (read + write)."""
     try:
-        import httplib2
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
 
         creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_PATH", "google_credentials.json")
+
+        if not os.path.isabs(creds_path):
+            # Resolve relative path against the directory of this script
+            creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), creds_path)
+
+        if not os.path.exists(creds_path):
+            logger.error(
+                f"Google credentials file NOT FOUND at: {creds_path!r}. "
+                f"Set GOOGLE_SERVICE_ACCOUNT_PATH env var to the correct path."
+            )
+            return None
+
         creds = service_account.Credentials.from_service_account_file(
             creds_path,
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
-        http = creds.authorize(httplib2.Http(timeout=20))
-        return build("sheets", "v4", http=http, cache_discovery=False)
+        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+        logger.debug(f"Sheets service built successfully from {creds_path!r}")
+        return service
     except Exception as e:
-        logger.error(f"Failed to build Sheets service: {e}")
+        logger.error(f"Failed to build Sheets service: {e}", exc_info=True)
         return None
 
 
