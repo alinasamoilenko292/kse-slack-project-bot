@@ -400,6 +400,18 @@ def handle_message(message, say, client):
             say(text=f"⚠️ Помилка при перевірці Drive: {e}")
         return
 
+    # ── Missing fields check: manual trigger for diagnostics ─────────────────
+    if text.lower().strip() in ("перевір нагадування", "check reminders", "/check-reminders"):
+        say(text="⏳ Перевіряю незаповнені поля та надсилаю нагадування...")
+        try:
+            from scheduler import run_missing_fields_now
+            result = run_missing_fields_now()
+            say(text=result)
+        except Exception as e:
+            logger.error(f"[check-reminders] Failed: {e}", exc_info=True)
+            say(text=f"⚠️ Помилка при перевірці нагадувань: {e}")
+        return
+
     # Show typing indicator
     client.chat_postEphemeral(
         channel=channel,

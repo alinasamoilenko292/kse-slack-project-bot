@@ -284,7 +284,7 @@ def weekly_missing_fields_reminder() -> None:
     logger.info(f"[Scheduler] Sent reminders to {sent}/{len(owner_issues)} managers.")
 
 
-# ── Public: manual Drive check (for bot diagnostics) ─────────────────────────
+# ── Public: manual triggers (for bot diagnostics) ────────────────────────────
 
 def run_drive_check_now() -> str:
     """
@@ -292,6 +292,77 @@ def run_drive_check_now() -> str:
     Call this from the bot when user types 'перевір драйв' / 'check drive'.
     """
     return daily_drive_check()
+
+
+def run_missing_fields_now() -> str:
+    """
+    Run weekly_missing_fields_reminder immediately and return a summary.
+    Call this from the bot when user types 'перевір нагадування'.
+    """
+    logger.info("[Scheduler] Manual trigger: run_missing_fields_now")
+    try:
+        from notion_tools import get_all_active_projects
+        from schemas import get_missing_required
+        from user_resolver import get_slack_id_for_notion_user
+    except Exception as e:
+        return f"Помилка імпорту: {e}"
+
+    try:
+        projects = get_all_active_projects()
+    except Exception as e:
+        return f"Не вдалося отримати проєкти з Notion: {e}"
+
+    owner_issues: dict[str, list[dict]] = {}
+
+    for project in projects:
+        try:
+            project_type = project.get("Тип проєкту", "")
+            missing = get_missing_required(project, project_type)
+            if not missing:
+                continue
+            for notion_uid in project.get("_owner_ids", []):
+                owner_issues.setdefault(notion_uid, []).append({
+                    "name": project.get("Назва", "—"),
+                    "url": project.get("url", ""),
+                    "missing": missing,
+                })
+        except Exception as e:
+            logger.warning(f"[run_missing_fields_now] Error processing project: {e}")
+
+    if not owner_issues:
+        return (
+            f"✅ Перевірено {len(projects)} активних проєктів — "
+            f"незаповнених обов'язкових полів не знайдено. Нікому нічого не відправлено."
+        )
+
+    sent = 0
+    skipped = 0
+    report_lines = [f"📊 Власників з незаповненими полями: {len(owner_issues)}"]
+
+    for notion_uid, issues in owner_issues.items():
+        slack_id = get_slack_id_for_notion_user(notion_uid)
+        if not slack_id:
+            skipped += 1
+            report_lines.append(f"  ⚠️ Notion {notion_uid[:8]}…: Slack ID не знайдено")
+            continue
+
+        msg_lines = ["📋 *Щотижневе нагадування* — ось твої проєкти з незаповненими полями:\n"]
+        for issue in issues[:10]:
+            field_list = ", ".join(issue["missing"])
+            url = f" (<{issue['url']}|відкрити>)" if issue["url"] else ""
+            msg_lines.append(f"• *{issue['name']}*{url}\n  ❌ Бракує: {field_list}")
+        msg_lines.append("\nНапиши мені назву проєкту — я допоможу дозаповнити прямо тут.")
+        _send_dm(slack_id, "\n".join(msg_lines))
+        sent += 1
+        report_lines.append(
+            f"  ✅ DM → <@{slack_id}> ({len(issues)} проєкт(ів) з бракуючими полями)"
+        )
+
+    return (
+        "Результат:\n"
+        + "\n".join(report_lines)
+        + f"\n\nВідправлено: {sent} DM(s). Пропущено (немає Slack ID): {skipped}."
+    )
 
 
 # ── APScheduler event listener ────────────────────────────────────────────────
