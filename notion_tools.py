@@ -369,26 +369,38 @@ def get_all_active_projects() -> list[dict]:
     """
     Fetch all active projects (not Done/Cancelled) for the scheduler.
     Also returns raw owner Notion IDs as '_owner_ids' for reverse Slack lookup.
+
+    Uses page_size=20 (safe threshold — pages of 30+ hit a Notion API bug
+    on records 26+ in this database). On pagination error, returns what was
+    already collected rather than raising.
     """
     INACTIVE = {"Done", "Cancelled"}
     cursor = None
     results = []
+    page_num = 0
 
     while True:
         kwargs = {
             "database_id": NOTION_DATABASE_ID,
-            "page_size": 50,
+            "page_size": 20,
         }
         if cursor:
             kwargs["start_cursor"] = cursor
 
-        response = notion.databases.query(**kwargs)
+        try:
+            response = notion.databases.query(**kwargs)
+        except Exception as e:
+            logger.warning(
+                f"[get_all_active_projects] Page {page_num + 1} failed: {e}. "
+                f"Returning {len(results)} projects collected so far."
+            )
+            break
 
+        page_num += 1
         for page in response.get("results", []):
             data = _page_to_dict(page)
             if data.get("Статус") in INACTIVE:
                 continue
-            # Also store raw owner Notion IDs for scheduler reverse lookup
             raw_owners = page.get("properties", {}).get(
                 "Відповідальна особа", {}
             ).get("people", [])
