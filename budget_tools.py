@@ -47,16 +47,27 @@ GENERAL_SHEET_NAME = "general"
 
 # ── Google Sheets service ─────────────────────────────────────────────────────
 
+_sheets_service_cache = None  # Built once, reused across calls
+
 def _get_sheets_service():
-    """Build and return a Google Sheets API service (read + write)."""
+    """
+    Build and return a Google Sheets API service (read + write).
+    Cached at module level — built once per process start.
+    Uses httplib2 with a 20-second timeout so no call ever hangs indefinitely.
+    """
+    global _sheets_service_cache
+    if _sheets_service_cache is not None:
+        return _sheets_service_cache
+
     try:
+        import httplib2
         from google.oauth2 import service_account
+        from google_auth_httplib2 import AuthorizedHttp
         from googleapiclient.discovery import build
 
         creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_PATH", "google_credentials.json")
 
         if not os.path.isabs(creds_path):
-            # Resolve relative path against the directory of this script
             creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), creds_path)
 
         if not os.path.exists(creds_path):
@@ -70,8 +81,10 @@ def _get_sheets_service():
             creds_path,
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
-        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
-        logger.debug(f"Sheets service built successfully from {creds_path!r}")
+        authorized_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=20))
+        service = build("sheets", "v4", http=authorized_http, cache_discovery=False)
+        _sheets_service_cache = service
+        logger.info(f"Sheets service built and cached from {creds_path!r}")
         return service
     except Exception as e:
         logger.error(f"Failed to build Sheets service: {e}", exc_info=True)

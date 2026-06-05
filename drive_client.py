@@ -427,10 +427,10 @@ def get_new_files_in_folder(folder_id: str, known_file_ids: list[str]) -> list[d
 
 def get_recent_files_in_folder(folder_id: str, since: "datetime") -> list[dict]:
     """
-    Return files modified after `since` (timezone-aware UTC datetime).
+    Return files CREATED (uploaded) after `since` (timezone-aware UTC datetime).
+    Uses createdTime — detects new uploads only, not edits to existing files.
     Checks top-level files + one subfolder level.
-    Skips subfolders themselves — only actual files are returned.
-    Used by the daily scheduler to detect uploads from the last 24/72 hours.
+    Used by the daily scheduler to detect new files from the last 24/72 hours.
     """
     service = _get_service()
     if not service:
@@ -438,17 +438,17 @@ def get_recent_files_in_folder(folder_id: str, since: "datetime") -> list[dict]:
 
     since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def _query_recent(fid: str) -> list[dict]:
+    def _query_new(fid: str) -> list[dict]:
         try:
             results = service.files().list(
                 q=(
                     f"'{fid}' in parents "
                     f"and trashed = false "
                     f"and mimeType != 'application/vnd.google-apps.folder' "
-                    f"and modifiedTime > '{since_str}'"
+                    f"and createdTime > '{since_str}'"
                 ),
-                fields="files(id, name, mimeType, modifiedTime)",
-                orderBy="modifiedTime desc",
+                fields="files(id, name, mimeType, createdTime)",
+                orderBy="createdTime desc",
                 pageSize=50,
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True,
@@ -458,9 +458,9 @@ def get_recent_files_in_folder(folder_id: str, since: "datetime") -> list[dict]:
             logger.error(f"get_recent_files_in_folder query failed for {fid}: {e}")
             return []
 
-    files = _query_recent(folder_id)
+    files = _query_new(folder_id)
 
-    # Scan subfolders one level deep (get all subfolders, not just recent ones)
+    # Scan subfolders one level deep
     try:
         subfolder_resp = service.files().list(
             q=(
@@ -473,7 +473,7 @@ def get_recent_files_in_folder(folder_id: str, since: "datetime") -> list[dict]:
             includeItemsFromAllDrives=True,
         ).execute()
         for sf in subfolder_resp.get("files", []):
-            files.extend(_query_recent(sf["id"]))
+            files.extend(_query_new(sf["id"]))
     except Exception as e:
         logger.error(f"get_recent_files_in_folder subfolder scan failed: {e}")
 

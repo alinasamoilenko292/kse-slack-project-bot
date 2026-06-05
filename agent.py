@@ -209,12 +209,18 @@ def run_agent(
                         fn = execute_tool
                     result = None
                     for _attempt in range(TOOL_RETRY_MAX + 1):
+                        # IMPORTANT: do NOT use ThreadPoolExecutor as context manager here.
+                        # `with executor:` calls shutdown(wait=True) on __exit__, which
+                        # blocks until the thread finishes — even after a TimeoutError.
+                        # Instead, create manually and shutdown(wait=False) on timeout.
+                        _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                         try:
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                                future = ex.submit(fn, block.name, block.input)
-                                result = future.result(timeout=TOOL_TIMEOUT)
+                            future = _executor.submit(fn, block.name, block.input)
+                            result = future.result(timeout=TOOL_TIMEOUT)
+                            _executor.shutdown(wait=False)
                             break  # success — exit retry loop
                         except concurrent.futures.TimeoutError:
+                            _executor.shutdown(wait=False)  # don't wait for hung thread
                             if _attempt < TOOL_RETRY_MAX:
                                 logger.warning(
                                     f"Tool {block.name} timed out (attempt {_attempt+1}), "
@@ -234,6 +240,7 @@ def run_agent(
                                     "дані збережено, достатньо написати 'повтори запис' за хвилину."
                                 )
                         except Exception as e:
+                            _executor.shutdown(wait=False)
                             logger.error(f"Tool {block.name} raised: {e}")
                             result = f"Помилка виконання {block.name}: {e}"
                             break  # don't retry on non-timeout errors
