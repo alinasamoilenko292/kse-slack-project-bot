@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import logging
 import requests
+import concurrent.futures
 from dotenv import load_dotenv
 load_dotenv()  # must be before any os.environ reads
 
@@ -21,6 +22,36 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
+
+# ── Global agent timeout ───────────────────────────────────────────────────────
+# Hard ceiling on total run_agent() time. Anthropic timeout is 90s inside agent.py;
+# this outer timeout is the final safety net for any unexpected hang.
+AGENT_TIMEOUT = 130  # seconds
+
+def _run_agent_safe(**kwargs) -> str:
+    """
+    Run the agent with a hard timeout.
+    Prevents Slack event handlers from blocking forever if any API hangs.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(run_agent, **kwargs)
+        return future.result(timeout=AGENT_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        executor.shutdown(wait=False)
+        uid = kwargs.get("slack_user_id", "?")
+        logger.error(f"[TIMEOUT] run_agent() exceeded {AGENT_TIMEOUT}s for user {uid}")
+        return (
+            "⏳ Запит зайняв надто довго і був автоматично скасований.\n"
+            "Це зазвичай тимчасова проблема з Google Sheets або Anthropic API.\n"
+            "Спробуй повторити — наступний запит виконається нормально."
+        )
+    except Exception as e:
+        executor.shutdown(wait=False)
+        logger.error(f"[AGENT ERROR] run_agent() raised: {e}", exc_info=True)
+        return f"⚠️ Сталася помилка при обробці: {e}"
+    finally:
+        executor.shutdown(wait=False)
 
 # Slack channel ID for payment notifications (bs-slack-payment)
 # Bot must be added to this channel to receive its messages.
@@ -319,7 +350,7 @@ def _handle_payment_channel_message(message: dict, client) -> None:
     prefixed_message = (
         f"[Сповіщення про оплату з каналу #bs-slack-payment]\n{full_text}"
     )
-    response_text = run_agent(
+    response_text = _run_agent_safe(
         slack_user_id=slack_user_id,
         user_message=prefixed_message,
         notion_user_id=user_info.get("notion_id"),
@@ -420,7 +451,7 @@ def handle_message(message, say, client):
     )
 
     user_info = resolve_user(slack_user_id)
-    response_text = run_agent(
+    response_text = _run_agent_safe(
         slack_user_id=slack_user_id,
         user_message=text,
         notion_user_id=user_info.get("notion_id"),
@@ -466,7 +497,7 @@ def action_project_type_chosen(ack, body, client, say):
     project_type = body["actions"][0]["selected_option"]["value"]
 
     _ui = resolve_user(user)
-    response = run_agent(
+    response = _run_agent_safe(
         slack_user_id=user,
         notion_user_id=_ui.get("notion_id"),
         user_email=_ui.get("email"),
@@ -546,7 +577,7 @@ def action_project_selected_for_update(ack, body, client):
     project_id = body["actions"][0]["selected_option"]["value"]
     project_name = body["actions"][0]["selected_option"]["text"]["text"]
     _ui = resolve_user(user)
-    response = run_agent(
+    response = _run_agent_safe(
         slack_user_id=user,
         notion_user_id=_ui.get("notion_id"),
         user_email=_ui.get("email"),
@@ -562,7 +593,7 @@ def action_check_missing(ack, body, client):
     user = body["user"]["id"]
     channel = body["container"]["channel_id"]
     _ui = resolve_user(user)
-    response = run_agent(
+    response = _run_agent_safe(
         slack_user_id=user,
         notion_user_id=_ui.get("notion_id"),
         user_email=_ui.get("email"),
@@ -578,7 +609,7 @@ def action_subprojects(ack, body, client):
     user = body["user"]["id"]
     channel = body["container"]["channel_id"]
     _ui = resolve_user(user)
-    response = run_agent(
+    response = _run_agent_safe(
         slack_user_id=user,
         notion_user_id=_ui.get("notion_id"),
         user_email=_ui.get("email"),
@@ -594,7 +625,7 @@ def action_confirm_yes(ack, body, client, say):
     user = body["user"]["id"]
     channel = body["container"]["channel_id"]
     _ui = resolve_user(user)
-    response = run_agent(
+    response = _run_agent_safe(
         slack_user_id=user,
         notion_user_id=_ui.get("notion_id"),
         user_email=_ui.get("email"),
@@ -610,7 +641,7 @@ def action_confirm_edit(ack, body, client):
     user = body["user"]["id"]
     channel = body["container"]["channel_id"]
     _ui = resolve_user(user)
-    response = run_agent(
+    response = _run_agent_safe(
         slack_user_id=user,
         notion_user_id=_ui.get("notion_id"),
         user_email=_ui.get("email"),
@@ -635,7 +666,7 @@ def action_fill_now(ack, body, client):
     user = body["user"]["id"]
     channel = body["container"]["channel_id"]
     _ui = resolve_user(user)
-    response = run_agent(
+    response = _run_agent_safe(
         slack_user_id=user,
         notion_user_id=_ui.get("notion_id"),
         user_email=_ui.get("email"),
@@ -712,7 +743,7 @@ def handle_message_shortcut(ack, shortcut, client):
 
     user_info = resolve_user(slack_user_id)
     prefixed = f"[Повідомлення переслане через шортkat]\n{full_text}"
-    response_text = run_agent(
+    response_text = _run_agent_safe(
         slack_user_id=slack_user_id,
         user_message=prefixed,
         notion_user_id=user_info.get("notion_id"),

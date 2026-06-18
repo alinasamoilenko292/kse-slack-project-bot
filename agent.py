@@ -22,7 +22,7 @@ from system_prompt import SYSTEM_PROMPT
 from usage_tracker import log_event, log_tool_calls
 
 logger = logging.getLogger(__name__)
-client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=90.0)
 
 MODEL_SMART = "claude-sonnet-4-6"
 MODEL_FAST  = "claude-haiku-4-5-20251001"
