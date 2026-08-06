@@ -94,6 +94,35 @@ def handle_dm(message, say, client):
     say(text=response)
 
 
+@app.shortcut("send_to_bot")
+def handle_shortcut(ack, shortcut, client):
+    ack()  # відповідь Slack протягом 3 секунд — обов'язково
+
+    slack_user_id = shortcut["user"]["id"]
+    message = shortcut.get("message", {})
+
+    text = message.get("text", "").strip()
+    attachments = message.get("attachments", [])
+    attachment_text = "\n".join(
+        a.get("fallback", "") or a.get("text", "") or a.get("pretext", "")
+        for a in attachments
+        if a.get("fallback") or a.get("text") or a.get("pretext")
+    ).strip()
+    full_text = (text + ("\n" + attachment_text if attachment_text else "")).strip()
+
+    if not full_text:
+        client.chat_postMessage(
+            channel=slack_user_id,
+            text="⚠️ Не вдалося прочитати повідомлення — воно порожнє.",
+        )
+        return
+
+    client.chat_postMessage(channel=slack_user_id, text="⏳ Обробляю оплату...")
+
+    response = _run_safe(slack_user_id=slack_user_id, user_message=full_text)
+    client.chat_postMessage(channel=slack_user_id, text=response)
+
+
 if __name__ == "__main__":
     handler = SocketModeHandler(app, os.environ["PAYMENT_SLACK_APP_TOKEN"])
     logger.info("💰 Payment Bot starting...")
