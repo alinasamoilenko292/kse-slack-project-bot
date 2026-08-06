@@ -17,7 +17,6 @@ import concurrent.futures
 from anthropic import Anthropic
 from notion_tools import TOOL_DEFINITIONS, execute_tool
 from drive_client import DRIVE_TOOL_DEFINITIONS, execute_drive_tool
-from budget_tools import BUDGET_TOOL_DEFINITIONS, execute_budget_tool
 from system_prompt import SYSTEM_PROMPT
 from usage_tracker import log_event, log_tool_calls
 
@@ -45,10 +44,6 @@ def _is_simple_confirmation(text: str) -> bool:
 
 
 # ── Tool routing ───────────────────────────────────────────────────────────────
-_BUDGET_KEYWORDS = {
-    "оплат", "бюджет", "контрагент", "сума документу", "дата платежу",
-    "1с", "usd", "дол", "платіж", "fact_", "курс",
-}
 _DRIVE_KEYWORDS = {
     "файл", "drive", "папк", "docx", "pdf", "програм", "список учасників",
     "завантаж", "зчитай", "освітня", "навчальний план",
@@ -59,17 +54,9 @@ def _select_tools(message: str) -> list:
     msg = message.lower()
     tools = list(TOOL_DEFINITIONS)  # Notion always included
 
-    needs_budget = any(kw in msg for kw in _BUDGET_KEYWORDS)
-    needs_drive  = any(kw in msg for kw in _DRIVE_KEYWORDS)
-
-    if needs_budget:
-        tools = tools + BUDGET_TOOL_DEFINITIONS
+    needs_drive = any(kw in msg for kw in _DRIVE_KEYWORDS)
     if needs_drive:
         tools = tools + DRIVE_TOOL_DEFINITIONS
-
-    # If nothing specific detected, include all (safe fallback)
-    if not needs_budget and not needs_drive:
-        tools = tools + DRIVE_TOOL_DEFINITIONS + BUDGET_TOOL_DEFINITIONS
 
     return tools
 
@@ -194,8 +181,7 @@ def run_agent(
             return text.strip()
 
         elif response.stop_reason == "tool_use":
-            drive_tool_names   = {t["name"] for t in DRIVE_TOOL_DEFINITIONS}
-            budget_tool_names  = {t["name"] for t in BUDGET_TOOL_DEFINITIONS}
+            drive_tool_names = {t["name"] for t in DRIVE_TOOL_DEFINITIONS}
 
             tool_results = []
             for block in response.content:
@@ -203,8 +189,6 @@ def run_agent(
                     logger.info(f"Tool call: {block.name}({block.input})")
                     if block.name in drive_tool_names:
                         fn = execute_drive_tool
-                    elif block.name in budget_tool_names:
-                        fn = execute_budget_tool
                     else:
                         fn = execute_tool
                     result = None

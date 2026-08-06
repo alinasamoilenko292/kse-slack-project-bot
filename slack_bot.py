@@ -53,10 +53,6 @@ def _run_agent_safe(**kwargs) -> str:
     finally:
         executor.shutdown(wait=False)
 
-# Slack channel ID for payment notifications (bs-slack-payment)
-# Bot must be added to this channel to receive its messages.
-PAYMENT_CHANNEL_ID = os.environ.get("PAYMENT_CHANNEL_ID", "C0AT59F5F2P")
-
 # Init usage tracking DB
 try:
     from usage_tracker import init_db
@@ -312,69 +308,10 @@ def handle_stats_command(ack, command, client):
     client.chat_postEphemeral(channel=channel, user=user_id, text=report)
 
 
-def _is_payment_notification(text: str) -> bool:
-    """Heuristic: does this message look like a 1C payment notification?"""
-    keywords = ["оплачено", "контрагент", "сума документу", "дата платежу"]
-    text_lower = text.lower()
-    # At least 2 of the keywords must be present
-    return sum(1 for kw in keywords if kw in text_lower) >= 2
-
-
-def _handle_payment_channel_message(message: dict, client) -> None:
-    """
-    Auto-process a payment notification from the bs-slack-payment channel.
-    Forwards the full message text to the bot's DM with the sender so the agent
-    can parse and record it interactively.
-    """
-    slack_user_id = message.get("user")
-    if not slack_user_id:
-        return
-
-    text = message.get("text", "")
-
-    # Also check attachments (1C notifications often come as bot messages with attachments)
-    attachments = message.get("attachments", [])
-    attachment_text = " ".join(
-        a.get("fallback", "") or a.get("text", "") or a.get("pretext", "")
-        for a in attachments
-    )
-    full_text = (text + "\n" + attachment_text).strip()
-
-    if not full_text or not _is_payment_notification(full_text):
-        return
-
-    logger.info(f"[PAYMENT] Detected payment notification from {slack_user_id}")
-
-    # Forward to the user's DM as if they sent it there
-    user_info = resolve_user(slack_user_id)
-    prefixed_message = (
-        f"[Сповіщення про оплату з каналу #bs-slack-payment]\n{full_text}"
-    )
-    response_text = _run_agent_safe(
-        slack_user_id=slack_user_id,
-        user_message=prefixed_message,
-        notion_user_id=user_info.get("notion_id"),
-        user_email=user_info.get("email"),
-        display_name=user_info.get("display_name"),
-    )
-
-    # Reply in DM (not in the payment channel to avoid noise)
-    try:
-        client.chat_postMessage(channel=slack_user_id, text=response_text)
-    except Exception as e:
-        logger.error(f"[PAYMENT] Could not DM {slack_user_id}: {e}")
-
-
 @app.message()
 def handle_message(message, say, client):
     """Handle any DM or message in channel where bot is mentioned."""
-    channel = message.get("channel", "")
     channel_type = message.get("channel_type")
-
-    # ── Payment channel: auto-detect and process in background ──────────────
-    if channel == PAYMENT_CHANNEL_ID:
-        _handle_payment_channel_message(message, client)
-        return
 
     # ── Regular messages: only respond to DMs or when mentioned ─────────────
     if channel_type not in ("im", "mpim"):

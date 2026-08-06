@@ -1,0 +1,19 @@
+[Unit]
+Description=KSE GBS Payment Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/slack_project_bot
+EnvironmentFile=/home/ubuntu/slack_project_bot/.env.payment
+ExecStart=/usr/bin/python3 /home/ubuntu/slack_project_bot/payment_bot.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slackbot-payment
+
+[Install]
+WantedBy=multi-user.target
