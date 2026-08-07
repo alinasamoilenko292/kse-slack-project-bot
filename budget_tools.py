@@ -93,106 +93,117 @@ def _get_sheets_service():
 
 # ── Payment text parsing ───────────────────────────────────────────────────────
 
+def _find_field(text: str, field_pattern: str) -> str | None:
+    """
+    Find a field value in two formats:
+      Format A (next-line): "FieldName\nValue"
+      Format B (inline):    "FieldName: Value"
+    Returns stripped value or None.
+    """
+    # Next-line format (value on the line after the field name)
+    m = re.search(field_pattern + r"[:\s]*\r?\n([^\n\r]+)", text, re.IGNORECASE | re.UNICODE)
+    if m:
+        return m.group(1).strip()
+    # Inline format (value on same line after colon/space)
+    m = re.search(field_pattern + r"[:\s]+([^\n\r]+)", text, re.IGNORECASE | re.UNICODE)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
 def parse_payment_message(text: str) -> dict:
     """
-    Parse a 1C payment notification message and extract key fields.
+    Parse a payment notification message and extract key fields.
 
-    Handles two common formats:
-      Format A (structured):
-        Контрагент: Прізвище Ім'я По-батькові
-        Проєкт: Назва_Проєкту_1С
+    Handles two formats:
+      Format A (next-line, approval app style):
+        Контрагент
+        Іванов Іван Іванович
+        Проєкт
+        KSE_GBS_ESG Leadership 2026
+        Сума документу
+        15 000,00 грн
+        Дата платежу
+        15.03.2026
+
+      Format B (inline/1C style):
+        Контрагент: Іванов Іван
+        Проєкт: KSE_MBA
         Сума документу: 15 000,00 грн
         Дата платежу: 15.03.2026
-
-      Format B (inline/Slack-forwarded):
-        "Оплачено | Контрагент Прізвище | Проєкт KSE_MBA | Сума 15000 грн | ..."
-
-    Returns dict with:
-        counterparty_surname, project_1c, amount (float), payment_date (str DD.MM.YYYY),
-        fact_column (e.g. "Fact_03_26"), raw_text, errors list
     """
     result: dict = {
         "counterparty_surname": None,
         "project_1c": None,
         "amount": None,
-        "currency": "UAH",  # "UAH" or "USD"
+        "currency": "UAH",
         "payment_date": None,
         "fact_column": None,
         "errors": [],
     }
 
-    # Counterparty — full name until end of line
-    m = re.search(r"Контрагент[:\s]+([^\n\r]+)", text, re.IGNORECASE | re.UNICODE)
-    if m:
-        result["counterparty_surname"] = m.group(1).strip()
+    # ── Counterparty ──────────────────────────────────────────────────────────
+    val = _find_field(text, r"Контрагент")
+    if val:
+        result["counterparty_surname"] = val
     else:
         result["errors"].append("Не знайдено Контрагент")
 
-    # Project 1C name — full line after Проєкт/Проект
-    m = re.search(r"[Пп]ро[єеe]кт[:\s]+([^\n\r,;|]+)", text, re.IGNORECASE | re.UNICODE)
-    if m:
-        result["project_1c"] = m.group(1).strip()[:120]
+    # ── Project 1C name ───────────────────────────────────────────────────────
+    val = _find_field(text, r"[Пп]ро[єеe]кт")
+    if val:
+        # Strip trailing junk (pipe, semicolon)
+        result["project_1c"] = re.split(r"[,;|]", val)[0].strip()[:120]
     else:
         result["errors"].append("Не знайдено Проєкт")
 
-    # Amount — try UAH first ("Сума документу ... грн"), then USD variants, then any "Сума ... грн"
-    # UAH — "Сума документу"
-    m = re.search(r"Сума\s+документу[:\s]+([\d\s\xa0.,]+)\s*грн", text, re.IGNORECASE | re.UNICODE)
-    if m:
-        raw_amount = m.group(1)
-        result["currency"] = "UAH"
-    else:
-        # USD — "Сума документу ... USD/дол/долар"
-        m = re.search(
-            r"Сума\s+документу[:\s]+([\d\s\xa0.,]+)\s*(?:USD|дол(?:ар(?:ів)?)?\.?)",
-            text, re.IGNORECASE | re.UNICODE
-        )
-        if m:
-            raw_amount = m.group(1)
+    # ── Amount ────────────────────────────────────────────────────────────────
+    # Try "Сума документу" first (most specific), then generic "Сума"
+    amount_str = None
+    for field_pat in [r"Сума\s+документу", r"Сума"]:
+        val = _find_field(text, field_pat)
+        if val:
+            amount_str = val
+            break
+
+    if amount_str:
+        # Detect currency
+        if re.search(r"USD|дол(?:ар(?:ів)?)?\.?", amount_str, re.IGNORECASE):
             result["currency"] = "USD"
         else:
-            # Generic "Сума ... грн"
-            m = re.search(r"Сума[^:\n]*[:\s]+([\d\s\xa0.,]+)\s*грн", text, re.IGNORECASE | re.UNICODE)
-            if m:
-                raw_amount = m.group(1)
-                result["currency"] = "UAH"
-            else:
-                # Generic "Сума ... USD/дол"
-                m = re.search(
-                    r"Сума[^:\n]*[:\s]+([\d\s\xa0.,]+)\s*(?:USD|дол(?:ар(?:ів)?)?\.?)",
-                    text, re.IGNORECASE | re.UNICODE
-                )
-                if m:
-                    raw_amount = m.group(1)
-                    result["currency"] = "USD"
-
-    if m:
-        raw_amount = m.group(1)
-        clean = re.sub(r"[\s\xa0]", "", raw_amount).replace(",", ".")
+            result["currency"] = "UAH"
+        # Extract digits
+        raw = re.sub(r"[^\d,.\xa0\s]", "", amount_str)
+        clean = re.sub(r"[\s\xa0]", "", raw).replace(",", ".")
         try:
             result["amount"] = float(clean)
         except ValueError:
-            result["errors"].append(f"Не вдалося розпарсити суму: {raw_amount!r}")
+            result["errors"].append(f"Не вдалося розпарсити суму: {amount_str!r}")
     else:
         result["errors"].append("Не знайдено Сума документу")
 
-    # Payment date — exact "Дата платежу" first, then fallback
-    m = re.search(r"Дата\s+платежу[:\s]+(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})", text, re.IGNORECASE | re.UNICODE)
-    if not m:
-        m = re.search(r"Дата[^\n:]*[:\s]+(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})", text, re.IGNORECASE | re.UNICODE)
-    if m:
-        raw_date = m.group(1).replace("-", ".").replace("/", ".")
-        parts = raw_date.split(".")
-        if len(parts) == 3:
-            day, month, year = parts
-            if len(year) == 2:
-                year = "20" + year
-            result["payment_date"] = f"{day.zfill(2)}.{month.zfill(2)}.{year}"
-            try:
-                dt = datetime.strptime(result["payment_date"], "%d.%m.%Y")
-                result["fact_column"] = f"Fact_{dt.month:02d}_{str(dt.year)[2:]}"
-            except ValueError:
-                result["errors"].append(f"Некоректна дата: {raw_date!r}")
+    # ── Payment date ──────────────────────────────────────────────────────────
+    val = _find_field(text, r"Дата\s+платежу")
+    if not val:
+        val = _find_field(text, r"Дата")
+    if val:
+        # Extract date pattern from value
+        dm = re.search(r"(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})", val)
+        if dm:
+            raw_date = dm.group(1).replace("-", ".").replace("/", ".")
+            parts = raw_date.split(".")
+            if len(parts) == 3:
+                day, month, year = parts
+                if len(year) == 2:
+                    year = "20" + year
+                result["payment_date"] = f"{day.zfill(2)}.{month.zfill(2)}.{year}"
+                try:
+                    dt = datetime.strptime(result["payment_date"], "%d.%m.%Y")
+                    result["fact_column"] = f"Fact_{dt.month:02d}_{str(dt.year)[2:]}"
+                except ValueError:
+                    result["errors"].append(f"Некоректна дата: {raw_date!r}")
+        else:
+            result["errors"].append(f"Не вдалося розпізнати дату: {val!r}")
     else:
         result["errors"].append("Не знайдено Дата платежу")
 
