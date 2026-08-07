@@ -636,61 +636,6 @@ def action_remind_week(ack, body, client):
     )
 
 
-# ── Message Shortcut handler ───────────────────────────────────────────────────
-# Triggered when user right-clicks a message → selects the shortcut.
-# Shortcut callback_id must be configured in api.slack.com → Interactivity & Shortcuts.
-# Use callback_id = "send_to_bot"
-
-@app.shortcut("send_to_bot")
-def handle_message_shortcut(ack, shortcut, client):
-    """
-    Message Shortcut: user right-clicks any message → 'Надіслати боту'.
-    Bot receives the original message text + attachments and processes it as a DM.
-    """
-    ack()  # must acknowledge within 3 seconds
-
-    slack_user_id = shortcut["user"]["id"]
-    message = shortcut.get("message", {})
-
-    # Collect message text
-    text = message.get("text", "").strip()
-
-    # Also collect attachment fallback text (1C notifications use attachments)
-    attachments = message.get("attachments", [])
-    attachment_text = "\n".join(
-        a.get("fallback", "") or a.get("text", "") or a.get("pretext", "")
-        for a in attachments
-        if a.get("fallback") or a.get("text") or a.get("pretext")
-    ).strip()
-
-    full_text = (text + ("\n" + attachment_text if attachment_text else "")).strip()
-
-    if not full_text:
-        client.chat_postMessage(
-            channel=slack_user_id,
-            text="⚠️ Не вдалося прочитати повідомлення (воно порожнє або не містить тексту)."
-        )
-        return
-
-    # Send a quick acknowledgement in DM
-    client.chat_postMessage(
-        channel=slack_user_id,
-        text="⏳ Обробляю повідомлення..."
-    )
-
-    user_info = resolve_user(slack_user_id)
-    prefixed = f"[Повідомлення переслане через шортkat]\n{full_text}"
-    response_text = _run_agent_safe(
-        slack_user_id=slack_user_id,
-        user_message=prefixed,
-        notion_user_id=user_info.get("notion_id"),
-        user_email=user_info.get("email"),
-        display_name=user_info.get("display_name"),
-    )
-
-    client.chat_postMessage(channel=slack_user_id, text=response_text)
-
-
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
