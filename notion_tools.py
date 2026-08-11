@@ -375,6 +375,7 @@ def get_all_active_projects() -> list[dict]:
     already collected rather than raising.
     """
     INACTIVE = {"Done", "Cancelled"}
+    IGNORED_TYPES = {"Внутрішній", "Ed Innovation"}
     cursor = None
     results = []
     page_num = 0
@@ -400,6 +401,8 @@ def get_all_active_projects() -> list[dict]:
         for page in response.get("results", []):
             data = _page_to_dict(page)
             if data.get("Статус") in INACTIVE:
+                continue
+            if data.get("Тип проєкту") in IGNORED_TYPES:
                 continue
             raw_owners = page.get("properties", {}).get(
                 "Відповідальна особа", {}
