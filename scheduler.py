@@ -138,17 +138,8 @@ def daily_drive_check() -> str:
         folder_id = _extract_drive_folder_id(folder_url) if folder_url else None
 
         if not folder_id:
-            # Fallback: search by name in Drive
-            try:
-                from drive_client import find_project_folder
-                folder = find_project_folder(project_name)
-                if folder:
-                    folder_id = folder["id"]
-            except Exception as e:
-                logger.warning(f"[Scheduler] Name search failed for '{project_name}': {e}")
-
-        if not folder_id:
             skipped_no_folder += 1
+            logger.debug(f"[Scheduler] '{project_name}': no Drive folder URL in Notion, skipping")
             continue
 
         # Find recently modified files
